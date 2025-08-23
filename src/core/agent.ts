@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { ToolResult, AgentContext, Tool, ConversationMessage, ToolCall, Mode } from '../types/index';
+import { ToolResult, AgentContext, Tool, ConversationMessage, ToolCall, Mode, ExecutionPlan } from '../types/index';
 import { FileSystemTools } from '../tools/filesystem';
 import { TerminalTools } from '../tools/terminal';
 import { config } from '../utils/config';
@@ -13,10 +13,13 @@ export class ClineAgent {
   private context: AgentContext;
   private tools: Tool[];
   private systemPrompt: string;
+  private modeManager: any;
 
-  constructor() {
+  constructor(modeManager?: any) {
+    this.modeManager = modeManager;
     const apiKey = config.get('geminiApiKey');
     if (!apiKey) {
+      console.error("Gemini API key not found in config.");
       throw new Error('Gemini API key is required. Set it with: cline-cli config --set-api-key YOUR_KEY');
     }
 
@@ -42,44 +45,59 @@ export class ClineAgent {
     // Initialize tools
     this.tools = [
       ...FileSystemTools.getTools(),
-      ...TerminalTools.getTools()
+      ...TerminalTools.getTools(),
+      {
+        name: 'create_plan',
+        description: 'Create an execution plan',
+        parameters: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            description: { type: 'string' },
+            steps: { type: 'array', items: { type: 'object' } }
+          },
+          required: ['title', 'description', 'steps']
+        },
+        execute: async (args: any) => {
+          return this.createPlan(args);
+        }
+      }
     ];
-
     this.systemPrompt = this.generateSystemPrompt();
   }
 
   private generateSystemPrompt(): string {
     return `You are Cline, an AI coding assistant that helps developers build software through natural language interaction.
 
-Core Capabilities:
-1. File System Operations: Read, write, modify, search, and delete files
-2. Terminal Command Execution: Run shell commands and interact with the system
-3. Code Analysis: Understand project structure and dependencies
-4. Plan/Act Mode: Strategic planning followed by tactical execution
+    Core Capabilities:
+    1. File System Operations: Read, write, modify, search, and delete files
+    2. Terminal Command Execution: Run shell commands and interact with the system
+    3. Code Analysis: Understand project structure and dependencies
+    4. Plan/Act Mode: Strategic planning followed by tactical execution
 
-Operating Modes:
-- Plan Mode: Read-only analysis and planning (default)
-- Act Mode: Execute file modifications and commands (requires user approval)
+    Operating Modes:
+    - Plan Mode: Read-only analysis and planning (default)
+    - Act Mode: Execute file modifications and commands (requires user approval)
 
-Key Principles:
-1. Always explain your reasoning and proposed actions clearly
-2. In Plan Mode, only analyze and propose - never execute
-3. In Act Mode, execute actions but always request user approval for destructive operations
-4. Maintain conversation context and refer to previous files/commands when relevant
-5. Be conservative with changes - prefer small, safe steps
-6. Always verify the working directory and project structure before operations
+    Key Principles:
+    1. Always explain your reasoning and proposed actions clearly
+    2. In Plan Mode, only analyze and propose - never execute
+    3. In Act Mode, execute actions but always request user approval for destructive operations
+    4. Maintain conversation context and refer to previous files/commands when relevant
+    5. Be conservative with changes - prefer small, safe steps
+    6. Always verify the working directory and project structure before operations
 
-When users ask for help:
-1. First analyze the project structure and requirements
-2. Create a clear plan with specific steps
-3. Present the plan and ask for approval before execution
-4. Execute steps one by one with clear explanations
-5. Verify results and handle errors gracefully
+    When users ask for help:
+    1. First analyze the project structure and requirements
+    2. Create a clear plan with specific steps
+    3. Present the plan and ask for approval before execution
+    4. Execute steps one by one with clear explanations
+    5. Verify results and handle errors gracefully
 
-Available Tools:
-${this.tools.map(tool => `- ${tool.name}: ${tool.description}`).join('\n')}
+    Available Tools:
+    ${this.tools.map(tool => `- ${tool.name}: ${tool.description}`).join('\n')}
 
-Always use the appropriate tools for file operations and command execution. Never make assumptions about file contents or project structure - verify first.`;
+    Always use the appropriate tools for file operations and command execution. Never make assumptions about file contents or project structure - verify first.`;
   }
 
   public async initialize(): Promise<void> {
@@ -208,7 +226,7 @@ Always use the appropriate tools for file operations and command execution. Neve
       // We'll simulate tool calls by parsing the response for tool usage patterns
       const result = await chat.sendMessage('Continue the conversation based on the context provided.');
       const response = await result.response;
-      const text = response.text();
+      let text = response.text();
 
       // Simple tool call detection - look for patterns like "I'll use [tool_name]"
       const toolCallPattern = /I'll use (\w+)\s*\(([^)]*)\)/g;
@@ -231,6 +249,28 @@ Always use the appropriate tools for file operations and command execution. Neve
           });
         } catch (e) {
           logger.warn('Failed to parse tool arguments:', e);
+        }
+      }
+
+      // Check for plan creation pattern
+      const planPattern = /CREATE_PLAN:\s*({.*})/s;
+      const planMatch = text.match(planPattern);
+
+      if (planMatch) {
+        try {
+          const planData = JSON.parse(planMatch[1]);
+          // Add plan creation tool call
+          toolCalls.push({
+            id: `plan_call_${Date.now()}`,
+            type: 'function',
+            function: {
+              name: 'create_plan',
+              arguments: JSON.stringify(planData)
+            }
+          });
+          text = text.replace(planPattern, '').trim();
+        } catch (e) {
+          logger.warn('Failed to parse plan data:', e);
         }
       }
 
@@ -279,6 +319,37 @@ Always use the appropriate tools for file operations and command execution. Neve
     }
 
     return results;
+  }
+
+  async createPlan(planData: any): Promise<ToolResult> {
+    try {
+      // Basic validation
+      if (!planData.title || !planData.description || !planData.steps) {
+        return {
+          success: false,
+          error: 'Invalid plan data: title, description, and steps are required'
+        };
+      }
+
+      const plan: ExecutionPlan = await this.modeManager.createPlan(
+        planData.title,
+        planData.description,
+        planData.steps
+      );
+
+      return {
+        success: true,
+        data: {
+          planId: plan.id
+        }
+      };
+    } catch (error) {
+      logger.error('Failed to create plan:', error);
+      return {
+        success: false,
+        error: `Failed to create plan: ${error}`
+      };
+    }
   }
 
   public getContext(): AgentContext {

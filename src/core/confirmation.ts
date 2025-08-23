@@ -247,7 +247,7 @@ export class ConfirmationSystem {
 
   public setAutoApprove(enabled: boolean): void {
     this.autoApprove = enabled;
-    logger.info(`Auto-approve ${enabled ? 'enabled' : 'disabled'}`);
+    logger.info(`Auto-approve set to: ${enabled}`);
   }
 
   public isAutoApproveEnabled(): boolean {
@@ -287,6 +287,19 @@ export class ConfirmationSystem {
     ]);
 
     return answers.confirm;
+  }
+
+  public async askQuestion(question: string, defaultValue?: string): Promise<string> {
+    const answers = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'question',
+        message: question,
+        default: defaultValue
+      }
+    ]);
+
+    return answers.question;
   }
 
   public async confirmExit(): Promise<boolean> {

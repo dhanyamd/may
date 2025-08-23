@@ -97,7 +97,29 @@ export class ModeManager {
     return Array.from(this.executionPlans.values());
   }
 
-  public async executePlanStep(planId: string, stepId: string): Promise<boolean> {
+  public async executePlan(planId: string, confirmation: any): Promise<boolean> {
+    const plan = this.executionPlans.get(planId);
+    if (!plan) {
+      throw new Error(`Plan not found: ${planId}`);
+    }
+
+    if (!plan.approved) {
+      throw new Error('Plan must be approved before execution');
+    }
+
+    for (const step of plan.steps) {
+      if (!step.completed) {
+        const success = await this.executePlanStep(planId, step.id, confirmation);
+        if (!success) {
+          return false;
+        }
+      }
+    }
+
+    return this.completePlan(planId);
+  }
+
+  public async executePlanStep(planId: string, stepId: string, confirmation: any): Promise<boolean> {
     const plan = this.executionPlans.get(planId);
     if (!plan) {
       throw new Error(`Plan not found: ${planId}`);
@@ -126,7 +148,17 @@ export class ModeManager {
     // In Act mode, execute the step
     try {
       logger.info(`Executing step: ${step.description}`);
+      logger.debug(`Step details: ${JSON.stringify(step.details)}`);
       
+      // Ask questions if the step has them
+      if (step.details.questions) {
+        for (const question of step.details.questions) {
+          const answer = await confirmation.askQuestion(question.text, question.default);
+          // Do something with the answer, like updating the step details
+          step.details[question.key] = answer;
+        }
+      }
+
       // Here you would implement the actual step execution logic
       // This would involve calling the appropriate tools based on step type
       await this.executeStepLogic(step);
@@ -147,19 +179,68 @@ export class ModeManager {
     switch (step.type) {
       case 'analysis':
         // Handle analysis steps
+        logger.info(`Analysis step completed: ${step.description}`);
         break;
       case 'file_operation':
-        // Handle file operations
+        // Handle file operations by calling appropriate tools
+        await this.executeFileOperation(step.details);
         break;
       case 'command':
         // Handle command execution
+        await this.executeCommand(step.details);
         break;
       case 'confirmation':
         // Handle confirmation steps
+        logger.info(`Confirmation step: ${step.description}`);
         break;
       default:
         throw new Error(`Unknown step type: ${step.type}`);
     }
+  }
+
+  private async executeFileOperation(details: any): Promise<void> {
+    // This would call the file system tools to perform the operation
+    logger.info(`Executing file operation: ${details.operation} on ${details.path}`);
+    
+    // Get the agent instance to access tools
+    const context = this.agent.getContext();
+    
+    // Import tools dynamically to avoid circular dependencies
+    const { FileSystemTools } = await import('../tools/filesystem');
+    
+    switch (details.operation) {
+      case 'create':
+      case 'write':
+        await FileSystemTools.writeFile(details.path, details.content, context);
+        break;
+      case 'modify':
+        await FileSystemTools.modifyFile(details.path, details.changes, context);
+        break;
+      case 'delete':
+        await FileSystemTools.deleteFile(details.path, context);
+        break;
+      default:
+        throw new Error(`Unknown file operation: ${details.operation}`);
+    }
+  }
+
+  private async executeCommand(details: any): Promise<void> {
+    // This would call the terminal tools to execute the command
+    logger.info(`Executing command: ${details.command}`);
+    
+    // Get the agent instance to access tools
+    const context = this.agent.getContext();
+    
+    // Import tools dynamically to avoid circular dependencies
+    const { TerminalTools } = await import('../tools/terminal');
+    
+    const options = {
+      cwd: details.cwd,
+      timeout: details.timeout,
+      env: details.env
+    };
+    
+    await TerminalTools.executeCommand(details.command, context, options);
   }
 
   public async completePlan(planId: string): Promise<boolean> {
