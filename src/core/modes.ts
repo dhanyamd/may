@@ -1,15 +1,18 @@
 import { Mode, AgentContext, ExecutionPlan, PlanStep } from '../types/index';
 import { logger } from '../utils/logger';
 import { ClineAgent } from './agent';
+import { ConfirmationSystem } from './confirmation';
 
 export class ModeManager {
   private agent: ClineAgent;
   private currentMode: Mode;
   private executionPlans: Map<string, ExecutionPlan>;
   private activePlanId: string | null;
+  private confirmationSystem: ConfirmationSystem;
 
-  constructor(agent: ClineAgent) {
+  constructor(agent: ClineAgent, confirmationSystem: ConfirmationSystem) {
     this.agent = agent;
+    this.confirmationSystem = confirmationSystem;
     this.currentMode = 'plan';
     this.executionPlans = new Map();
     this.activePlanId = null;
@@ -162,6 +165,14 @@ export class ModeManager {
       // Here you would implement the actual step execution logic
       // This would involve calling the appropriate tools based on step type
       await this.executeStepLogic(step);
+
+      // If the step involved a destructive operation, confirm its success
+      if (step.type === 'file_operation' || step.type === 'command') {
+        const confirmResult = await this.confirmationSystem.confirmToolResults([{ success: true, data: step.details }]);
+        if (!confirmResult) {
+          throw new Error(`User rejected confirmation of step results: ${step.description}`);
+        }
+      }
       
       step.completed = true;
       logger.success(`Step completed: ${step.description}`);
@@ -211,13 +222,16 @@ export class ModeManager {
     switch (details.operation) {
       case 'create':
       case 'write':
-        await FileSystemTools.writeFile(details.path, details.content, context);
+        const writeResult = await FileSystemTools.writeFile(details.path, details.content, context);
+        if (!writeResult.success) throw new Error(writeResult.error);
         break;
       case 'modify':
-        await FileSystemTools.modifyFile(details.path, details.changes, context);
+        const modifyResult = await FileSystemTools.modifyFile(details.path, details.changes, context);
+        if (!modifyResult.success) throw new Error(modifyResult.error);
         break;
       case 'delete':
-        await FileSystemTools.deleteFile(details.path, context);
+        const deleteResult = await FileSystemTools.deleteFile(details.path, context);
+        if (!deleteResult.success) throw new Error(deleteResult.error);
         break;
       default:
         throw new Error(`Unknown file operation: ${details.operation}`);
@@ -240,7 +254,8 @@ export class ModeManager {
       env: details.env
     };
     
-    await TerminalTools.executeCommand(details.command, context, options);
+    const commandResult = await TerminalTools.executeCommand(details.command, context, options);
+    if (!commandResult.success) throw new Error(commandResult.error);
   }
 
   public async completePlan(planId: string): Promise<boolean> {
@@ -361,5 +376,9 @@ export class ModeManager {
         logger.warn(`Unknown operation type: ${operationType}`);
         return false;
     }
+  }
+
+  public getConfirmationSystem(): ConfirmationSystem {
+    return this.confirmationSystem;
   }
 }

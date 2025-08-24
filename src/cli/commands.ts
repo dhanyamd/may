@@ -20,8 +20,8 @@ export class CLICommands {
 
   constructor() {
     this.agent = new ClineAgent();
-    this.modeManager = new ModeManager(this.agent);
     this.confirmation = new ConfirmationSystem();
+    this.modeManager = new ModeManager(this.agent, this.confirmation);
     this.program = new Command();
   }
 
@@ -52,7 +52,7 @@ export class CLICommands {
       .option('-a', 'Start in Act mode')
       .option('-y', '--yes', 'Auto-approve all actions')
       .action(async (prompt: string | undefined, options: any) => {
-        await this.handleMainCommand(prompt, options, this.confirmation);
+        await this.handleMainCommand(prompt, options);
       });
 
     // Config commands
@@ -222,85 +222,41 @@ export class CLICommands {
       });
   }
 
-  private async handleMainCommand(prompt: string | any, options: any, confirmation: ConfirmationSystem): Promise<void> {
-    try {
-      this.confirmation = new ConfirmationSystem();
-
-      // Set auto-approve if requested
-      //@ts-ignore
-      let autoApproveEnabled = false;
-      if (options.yes) {
-        autoApproveEnabled = true;
-        config.set('autoApprove', true);
-      }
-
-      // Set initial mode
-      if (options.a) {
-        await this.modeManager.switchMode('act');
-      } else if (options.p) {
-        await this.modeManager.switchMode('plan');
-      }
-
-      // Use the prompt if provided
-      if (prompt) {
-        const spinner = ora('Processing your request...').start();
-        try {
-          const response = await this.agent.processMessage(prompt);
-          spinner.succeed('Response ready:');
-          console.log(chalk.green(response));
-
-          // If a plan was created, ask for approval and execute
-          const activePlan = this.modeManager.getActivePlan();
-          if (activePlan) {
-            const confirm = await confirmation.confirmPlanExecution(activePlan.title, activePlan.steps);
-            if (confirm) {
-              await this.modeManager.approvePlan(activePlan.id);
-              await this.modeManager.switchMode('act');
-              await this.modeManager.executePlan(activePlan.id, confirmation);
-            } else {
-              await this.modeManager.rejectPlan(activePlan.id);
-            }
-          }
-        } catch (error: any) {
-          spinner.fail('Failed to process request:');
-          logger.error(error);
-          console.error("Error in handleMainCommand:", error);
-        }
-      } else if (this.modeManager.isInActMode()) {
-        const activePlan = this.modeManager.getActivePlan();
-        if (activePlan) {
-          const confirm = await confirmation.confirmPlanExecution(activePlan.title, activePlan.steps);
-          if (confirm) {
-            await this.modeManager.approvePlan(activePlan.id);
-            await this.modeManager.executePlan(activePlan.id, confirmation);
-          } else {
-            await this.modeManager.rejectPlan(activePlan.id);
-          }
-        }
-      }
-    } catch (error: any) {
-      logger.error('Error in setup:', error.message);
+  private async handleMainCommand(prompt: string | undefined, options: any): Promise<void> {
+    // Set auto-approve if requested
+    //@ts-ignore
+    let autoApproveEnabled = false;
+    if (options.yes) {
+      autoApproveEnabled = true;
+      config.set('autoApprove', true);
     }
+
+    // Set initial mode
+    if (options.a) {
+      await this.modeManager.switchMode('act');
+    } else if (options.p) {
+      await this.modeManager.switchMode('plan');
+    }
+
+    // If a prompt is provided, process it
+    if (prompt) {
+      const spinner = ora('Processing your request...').start();
+      try {
+        const response = await this.agent.processMessage(prompt);
+        spinner.succeed('Response ready:');
+        console.log(chalk.green(response));
+      } catch (error: any) {
+        spinner.fail('Failed to process request:');
+        logger.error(error);
+        console.error("Error in handleMainCommand:", error);
+      }
+    }
+
+    // Enter interactive mode if no prompt was given or if a plan was just created/executed
+    await this.startInteractiveMode();
   }
 
-  //@ts-ignore
-  private processPrompt(prompt: string | undefined): void {
-    const spinner = ora('Processing your request...').start();
-    
-    try {
-      this.agent.processMessage(prompt as string);
-      spinner.succeed('Response ready:');
-      console.log(chalk.green(this.agent.processMessage(prompt as string)));
-    } catch (error: any) {
-      spinner.fail('Failed to process request:');
-      logger.error(error);
-      console.error("Error in processPrompt:", error);
-      process.exit(1);
-    }
-  }
-  
-  //@ts-ignore
-  private async startInteractiveMode(): Promise<void> {
+  public async startInteractiveMode(): Promise<void> {
     const context = this.agent.getContext();
     console.log(chalk.blue.bold('\n🤖 Welcome to Cline CLI - AI Coding Assistant'));
     console.log(chalk.gray('==============================================='));
@@ -327,7 +283,22 @@ export class CLICommands {
 
         const input = answers.input as string;
         
-        if (!input) continue;
+        if (!input) {
+          // If no input, and in Act mode, try to execute active plan
+          if (this.modeManager.isInActMode()) {
+            const activePlan = this.modeManager.getActivePlan();
+            if (activePlan) {
+              const confirm = await this.confirmation.confirmPlanExecution(activePlan.title, activePlan.steps);
+              if (confirm) {
+                await this.modeManager.approvePlan(activePlan.id);
+                await this.modeManager.executePlan(activePlan.id, this.confirmation);
+              } else {
+                await this.modeManager.rejectPlan(activePlan.id);
+              }
+            }
+          }
+          continue;
+        }
 
         // Handle built-in commands
         if (input.toLowerCase() === 'exit' || input.toLowerCase() === 'quit') {
@@ -355,6 +326,20 @@ export class CLICommands {
         spinner.succeed('Response:');
         console.log(chalk.green(response));
         console.log();
+
+        // If a plan was created, ask for approval and execute
+        const activePlan = this.modeManager.getActivePlan();
+        if (activePlan) {
+          const confirm = await this.confirmation.confirmPlanExecution(activePlan.title, activePlan.steps);
+          if (confirm) {
+            await this.modeManager.approvePlan(activePlan.id);
+            await this.modeManager.switchMode('act');
+            await this.modeManager.executePlan(activePlan.id, this.confirmation);
+          } else {
+            await this.modeManager.rejectPlan(activePlan.id);
+          }
+        }
+
       } catch (error: any) {
         logger.error('Error in interactive mode:', error.message);
         console.log(chalk.red('An error occurred. Please try again.'));

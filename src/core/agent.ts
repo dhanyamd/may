@@ -81,7 +81,7 @@ export class ClineAgent {
 
     Key Principles:
     1. Always explain your reasoning and proposed actions clearly
-    2. In Plan Mode, only analyze and propose - never execute
+    2. In Plan Mode, only analyze and propose plans with code - never execute
     3. In Act Mode, execute actions but always request user approval for destructive operations
     4. Maintain conversation context and refer to previous files/commands when relevant
     5. Be conservative with changes - prefer small, safe steps
@@ -97,7 +97,24 @@ export class ClineAgent {
     Available Tools:
     ${this.tools.map(tool => `- ${tool.name}: ${tool.description}`).join('\n')}
 
-    Always use the appropriate tools for file operations and command execution. Never make assumptions about file contents or project structure - verify first.`;
+    CRITICAL: When you need to use a tool, you MUST output a JSON array of tool calls in the following format, *preceded by the string "TOOL_CALLS:"*. DO NOT deviate from this format.
+    TOOL_CALLS:[
+      {
+        "name": "tool_name",
+        "arguments": {
+          "param1": "value1",
+          "param2": "value2"
+        }
+      },
+      {
+        "name": "another_tool",
+        "arguments": {
+          "paramA": "valueA"
+        }
+      }
+    ]
+    After the TOOL_CALLS block, you can provide additional natural language response.
+    You MUST use the appropriate tools for file operations and command execution. Never make assumptions about file contents or project structure - verify first.`;
   }
 
   public async initialize(): Promise<void> {
@@ -227,39 +244,39 @@ export class ClineAgent {
       const result = await chat.sendMessage('Continue the conversation based on the context provided.');
       const response = await result.response;
       let text = response.text();
-
-      // Simple tool call detection - look for patterns like "I'll use [tool_name]"
-      const toolCallPattern = /I'll use (\w+)\s*\(([^)]*)\)/g;
       const toolCalls: ToolCall[] = [];
-      let match;
-      
-      while ((match = toolCallPattern.exec(text)) !== null) {
-        const toolName = match[1];
-        const argsStr = match[2];
-        
+
+      const toolCallsBlockPattern = /TOOL_CALLS:(\s*\[\s*{[^\]]*?}\s*\])/s;
+      const toolCallsBlockMatch = text.match(toolCallsBlockPattern);
+
+      if (toolCallsBlockMatch) {
         try {
-          const args = JSON.parse(argsStr);
-          toolCalls.push({
-            id: `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            type: 'function',
-            function: {
-              name: toolName,
-              arguments: JSON.stringify(args)
-            }
-          });
+          const toolCallsJson = toolCallsBlockMatch[1];
+          const parsedToolCalls = JSON.parse(toolCallsJson);
+
+          for (const call of parsedToolCalls) {
+            toolCalls.push({
+              id: `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+              type: 'function',
+              function: {
+                name: call.name,
+                arguments: JSON.stringify(call.arguments)
+              }
+            });
+          }
+          text = text.replace(toolCallsBlockPattern, '').trim();
         } catch (e) {
-          logger.warn('Failed to parse tool arguments:', e);
+          logger.error('Failed to parse tool calls JSON:', e);
         }
       }
 
-      // Check for plan creation pattern
+      // Check for plan creation pattern (still support old format for now)
       const planPattern = /CREATE_PLAN:\s*({.*})/s;
       const planMatch = text.match(planPattern);
 
       if (planMatch) {
         try {
           const planData = JSON.parse(planMatch[1]);
-          // Add plan creation tool call
           toolCalls.push({
             id: `plan_call_${Date.now()}`,
             type: 'function',
@@ -276,7 +293,7 @@ export class ClineAgent {
 
       if (toolCalls.length > 0) {
         return {
-          content: text.replace(toolCallPattern, '').trim(),
+          content: text,
           toolCalls
         };
       } else {
@@ -307,6 +324,8 @@ export class ClineAgent {
       try {
         logger.info(`Executing tool: ${tool.name}`);
         const args = JSON.parse(toolCall.function.arguments);
+        
+        // Directly execute the tool. Approval logic is handled by ModeManager for plan steps.
         const result = await tool.execute(args, this.context);
         results.push(result);
       } catch (error) {
